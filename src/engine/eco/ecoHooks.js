@@ -1,0 +1,9 @@
+export const ECO_HOOKS = {
+  ON_VIBRA_RESULT:    'ON_VIBRA_RESULT',
+  ON_REST:            'ON_REST',
+  ON_DRAW:            'ON_DRAW',
+  ON_KO:              'ON_KO',
+  ON_PLACE_CONQUERED: 'ON_PLACE_CONQUERED',
+  ON_NODE_COMPLETE:   'ON_NODE_COMPLETE',
+  ON_COMBAT_START:    'ON_COMBAT_START',
+};
