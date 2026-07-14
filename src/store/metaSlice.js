@@ -1,8 +1,9 @@
 /**
- * Meta-progresión del coleccionista. GDD sección 10.
- * Nivel 1-20, puntos, historial de runs, logros, maestría de ecos.
+ * Meta-progresión del coleccionista. GDD sección 10 + GDD v4.0 §8.1.
+ * Nivel 1-20, puntos, historial de runs, logros, maestría de ecos, collector XP.
  */
 import { checkRunAchievements } from '../data/achievements.js';
+import { computeCollectorLevel } from '../data/economyConfig.js';
 
 // Umbral de puntos para alcanzar cada nivel (índice 0 = nivel 1).
 export const LEVEL_THRESHOLDS = [
@@ -61,6 +62,9 @@ export const POINTS = {
 export const INITIAL_META = {
   collectionLevel:  1,
   collectionPoints: 0,
+  collectorLevel:   1,
+  collectorXP:      0,
+  leveledUp:        undefined,
   achievements:     {},           // { [achievementId]: { unlocked: bool, unlockedAt: ms } }
   runHistory:       [],           // max 50
   currentWinStreak: 0,
@@ -72,9 +76,14 @@ export const INITIAL_META = {
     totalPifias:       0,
     totalVibrationTime: 0,
   },
-  ecoMastery:      {},            // { [ecoId]: timesChosen }
-  characterUsage:  {},            // { [characterId]: timesPlayed }
-  placeStats:      {},            // { [placeId]: timesConquered }
+  ecoMastery:           {},       // { [ecoId]: timesChosen }
+  characterUsage:       {},       // { [characterId]: timesPlayed }
+  placeStats:           {},       // { [placeId]: timesConquered }
+  dailyChallengeState:  null,     // { date: 'YYYYMMDD', completed: bool, probesPassed: number }
+  bestDailyResult:      null,     // { date: 'YYYYMMDD', probesPassed: number }
+  audioEnabled:         true,
+  savedProbeConfigs:    {},       // { [probeType]: [{id, name, config, createdAt}] } max 5 per type
+  hasSeenIntro:         false,
 };
 
 export function metaReducer(meta = INITIAL_META, action) {
@@ -186,6 +195,63 @@ export function metaReducer(meta = INITIAL_META, action) {
 
     case 'CLEAR_NEW_UNLOCKED':
       return { ...meta, newlyUnlocked: [] };
+
+    case 'GAIN_COLLECTOR_XP': {
+      const newXP    = (meta.collectorXP ?? 0) + (action.amount ?? 0);
+      const newLevel = computeCollectorLevel(newXP);
+      const leveled  = newLevel > (meta.collectorLevel ?? 1);
+      return {
+        ...meta,
+        collectorXP:    newXP,
+        collectorLevel: newLevel,
+        ...(leveled ? { leveledUp: newLevel } : {}),
+      };
+    }
+
+    case 'CLEAR_LEVEL_UP':
+      return { ...meta, leveledUp: undefined };
+
+    case 'SET_DAILY_CHALLENGE': {
+      const prev       = meta.bestDailyResult;
+      const isNewBest  = !prev || action.probesPassed > prev.probesPassed;
+      return {
+        ...meta,
+        dailyChallengeState: { date: action.date, completed: action.completed, probesPassed: action.probesPassed },
+        bestDailyResult: isNewBest
+          ? { date: action.date, probesPassed: action.probesPassed }
+          : prev,
+      };
+    }
+
+    case 'SET_HAS_SEEN_INTRO':
+      return { ...meta, hasSeenIntro: true };
+
+    case 'SET_AUDIO_ENABLED':
+      return { ...meta, audioEnabled: action.enabled };
+
+    case 'SAVE_PROBE_CONFIG': {
+      const { probeType, entry } = action;
+      const existing = meta.savedProbeConfigs?.[probeType] ?? [];
+      return {
+        ...meta,
+        savedProbeConfigs: {
+          ...(meta.savedProbeConfigs ?? {}),
+          [probeType]: [...existing, entry].slice(-5),
+        },
+      };
+    }
+
+    case 'DELETE_PROBE_CONFIG': {
+      const { probeType, id } = action;
+      const existing = meta.savedProbeConfigs?.[probeType] ?? [];
+      return {
+        ...meta,
+        savedProbeConfigs: {
+          ...(meta.savedProbeConfigs ?? {}),
+          [probeType]: existing.filter(e => e.id !== id),
+        },
+      };
+    }
 
     // Compat: acciones antiguas
     case 'RECORD_RUN': {

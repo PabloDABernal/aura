@@ -1,45 +1,89 @@
+/**
+ * Store principal — GDD v4.0 (modelo de personaje v2: 3 habilidades).
+ * Clave: 'aura-v2', versión 3.
+ */
 import { create }  from 'zustand';
 import { persist } from 'zustand/middleware';
-import { combatReducer }                    from '../engine/combat/combatReducer.js';
-import { INITIAL_COMBAT_STATE, DATA_CTX } from '../data/phase1Data.js';
-import { INITIAL_META, metaReducer }        from './metaSlice.js';
-import { INITIAL_COLLECTION, collectionReducer } from './collectionSlice.js';
+import { INITIAL_META, metaReducer }                       from './metaSlice.js';
+import {
+  createCollectionSlice,
+  migrateCharactersProbeProgress,
+  resetCharactersProbeProgress,
+} from './collectionSlice.js';
+import { createRunSlice }                                   from './runSlice.js';
+import { createEconomySlice }                               from './economySlice.js';
+import { pushToFirestore, pullFromFirestore }               from './sync.js';
 
-/**
- * Normaliza los sets de la colección del jugador al formato que espera el runGenerator
- * (leaders[], guests[], placeIds[], corruptIds[]).
- */
-function normalizeCollectionSets(collection) {
-  const chars = collection?.characters ?? {};
-  const result = {};
-  for (const [id, s] of Object.entries(collection?.sets ?? {})) {
-    if (s.status === 'archived') continue;
-    const setChars = (s.characters ?? [])
-      .map(cid => chars[cid])
-      .filter(Boolean)
-      .filter(c => c.status === 'confirmed');
-    const leaders  = setChars.filter(c => c.leader !== null).map(c => c.id);
-    const guests   = setChars.filter(c => c.leader === null).map(c => c.id);
-    result[id] = {
-      ...s,
-      icon:      s.icon ?? '⭐',
-      leaders:   leaders.length > 0 ? leaders : [],
-      guests:    guests.length  > 0 ? guests  : setChars.slice(1).map(c => c.id),
-      placeIds:  s.placeId ? [s.placeId] : [],
-      corruptIds: leaders.slice(0, 1),
-    };
+const DEFAULT_PASSIVE = { id: 'pg01', name: 'Vitalidad',    description: '+1 vida al empezar la run',                           scope: 'general' };
+const DEFAULT_ACTIVE  = { id: 'ag01', name: 'Cámara lenta', description: 'Reduce la velocidad del cronómetro al 50% durante 5s', scope: 'general' };
+const DEFAULT_AURA    = { id: 'aug01', name: 'Revive',       description: 'Recuperar 1 vida',                                    scope: 'general' };
+
+function migrateToV2(state) {
+  const newCombos     = [];
+  const newCharacters = {};
+
+  for (const [id, char] of Object.entries(state.characters ?? {})) {
+    let migratedChar;
+
+    if (char.passiveAbility) {
+      migratedChar = { failedRunsAtGrade: 0, temporalResidues: 0, ...char };
+    } else {
+      let passiveAbility = DEFAULT_PASSIVE;
+      let activeAbility  = DEFAULT_ACTIVE;
+
+      if (char.ability?.type === 'passive') {
+        passiveAbility = { id: char.ability.id, name: char.ability.name, description: char.ability.description, scope: 'general' };
+      } else if (char.ability?.type === 'active') {
+        activeAbility  = { id: char.ability.id, name: char.ability.name, description: char.ability.description, scope: 'general' };
+      }
+
+      const auraAbility = char.auraAbility
+        ? { id: char.auraAbility.id, name: char.auraAbility.name, description: char.auraAbility.description, scope: 'general' }
+        : DEFAULT_AURA;
+
+      migratedChar = { ...char, passiveAbility, activeAbility, auraAbility, failedRunsAtGrade: 0, temporalResidues: 0 };
+    }
+
+    newCharacters[id] = migratedChar;
+
+    if (migratedChar.status === 'active' &&
+        migratedChar.passiveAbility && migratedChar.activeAbility && migratedChar.auraAbility) {
+      const combo = `${migratedChar.passiveAbility.id}|${migratedChar.activeAbility.id}|${migratedChar.auraAbility.id}`;
+      if (!newCombos.includes(combo)) newCombos.push(combo);
+    }
   }
-  return result;
+
+  const { usedAbilityIds: _old, ...restState } = state;
+  return { ...restState, characters: newCharacters, usedAbilityCombos: newCombos };
 }
 
-function buildDataCtx(collection) {
-  const extraChars  = collection?.characters ?? {};
-  const extraPlaces = collection?.places     ?? {};
-  const normalizedSets = normalizeCollectionSets(collection);
+function migrateToV3(state) {
   return {
-    characters: { ...DATA_CTX.characters, ...extraChars },
-    places:     { ...DATA_CTX.places,     ...extraPlaces },
-    sets:       { ...normalizedSets },
+    ...state,
+    lereles:             state.lereles             ?? 100,
+    auraFragments:       state.auraFragments        ?? 0,
+    extraEcoSlots:       state.extraEcoSlots        ?? 0,
+    completedAuraRanges: state.completedAuraRanges  ?? [],
+    meta: {
+      ...state.meta,
+      collectorLevel: state.meta?.collectorLevel ?? 1,
+      collectorXP:    state.meta?.collectorXP    ?? 0,
+    },
+  };
+}
+
+function migrateToV4(state) {
+  return {
+    ...state,
+    characters: migrateCharactersProbeProgress(state.characters ?? {}),
+  };
+}
+
+function migrateToV5(state) {
+  // Reset probeProgress al nuevo modelo por parámetro (GDD v4.2). No convierte valores viejos.
+  return {
+    ...state,
+    characters: resetCharactersProbeProgress(state.characters ?? {}),
   };
 }
 
@@ -47,135 +91,110 @@ const useStore = create(
   persist(
     (set, get) => ({
 
-      // ── CombatState ────────────────────────────────────────────────────────
-      combat: INITIAL_COMBAT_STATE,
+      // ── Colección de personajes ────────────────────────────────────────────
+      ...createCollectionSlice(set, get),
 
-      dispatchCombat: (action) =>
-        set(state => ({
-          combat: combatReducer(state.combat, action, buildDataCtx(state.collection)),
-        })),
+      // ── Run activa ────────────────────────────────────────────────────────
+      ...createRunSlice(set, get),
 
-      resetCombat: () =>
-        set({ combat: INITIAL_COMBAT_STATE }),
+      // ── Economía ──────────────────────────────────────────────────────────
+      ...createEconomySlice(set, get),
 
-      setCombat: (newState) =>
-        set({ combat: newState }),
-
-      // ── RunConfig (selección previa) ──────────────────────────────────────
-      runConfig: { selectedSets: [], selectedLeaders: {} },
-
-      setRunConfig: (cfg) => set({ runConfig: cfg }),
-
-      // ── Run activa (RunState completo) ────────────────────────────────────
-      run: null,
-
-      initRun: (runState) => set({ run: runState }),
-
-      setRun: (newRun) => set({ run: newRun }),
-
-      completeNode: (areaIdx, nodeIdx, result) =>
-        set(state => {
-          if (!state.run) return {};
-          const areas = state.run.areas.map((a, ai) => {
-            if (ai !== areaIdx) return a;
-            const nodes = a.nodes.map((n, ni) =>
-              ni === nodeIdx ? { ...n, completed: true, result } : n
-            );
-            return { ...a, nodes, currentNodeIndex: nodeIdx + 1 };
-          });
-          const area = areas[areaIdx];
-          const areaComplete = area.nodes.every(n => n.completed);
-          const currentAreaIndex = areaComplete
-            ? Math.min(areaIdx + 1, areas.length - 1)
-            : areaIdx;
-          return { run: { ...state.run, areas, currentAreaIndex } };
-        }),
-
-      updateRun: (patch) =>
-        set(state => ({ run: state.run ? { ...state.run, ...patch } : state.run })),
-
-      addRunEco: (ecoId) =>
-        set(state => {
-          if (!state.run) return {};
-          const ecos = state.run.activeEcos ?? [];
-          if (ecos.length >= 10 || ecos.includes(ecoId)) return {};
-          return { run: { ...state.run, activeEcos: [...ecos, ecoId] } };
-        }),
-
-      removeRunEco: (ecoId) =>
-        set(state => {
-          if (!state.run) return {};
-          return { run: { ...state.run, activeEcos: (state.run.activeEcos ?? []).filter(id => id !== ecoId) } };
-        }),
-
-      endRun: (victory) =>
-        set(state => ({ run: state.run ? { ...state.run, victory, active: false } : state.run })),
-
-      // ── MetaState ──────────────────────────────────────────────────────────
+      // ── Meta-progresión ───────────────────────────────────────────────────
       meta: INITIAL_META,
 
       dispatchMeta: (action) =>
         set(state => ({ meta: metaReducer(state.meta, action) })),
 
-      // ── Colección del jugador ─────────────────────────────────────────────
-      collection: INITIAL_COLLECTION,
-
-      dispatchCollection: (action) =>
-        set(state => ({ collection: collectionReducer(state.collection, action) })),
-
-      // Devuelve el dataCtx con personajes, lugares y sets fusionados (phase1Data + colección).
-      getDataCtx: () => buildDataCtx(get().collection),
-
-      // ── Auth ───────────────────────────────────────────────────────────────
+      // ── Auth ──────────────────────────────────────────────────────────────
       auth: { user: null, playLocal: false },
 
-      setAuth: (auth) => set({ auth }),
+      setAuth: (authData) => set({ auth: authData }),
 
-      // ── UI ─────────────────────────────────────────────────────────────────
-      screen:    'login',
+      // ── Sync ──────────────────────────────────────────────────────────────
+      syncStatus: 'idle', // 'idle' | 'syncing' | 'synced' | 'offline'
+
+      setSyncStatus: (status) => set({ syncStatus: status }),
+
+      pushToCloud: async () => {
+        const state = get();
+        const uid   = state.auth?.user?.uid;
+        if (!uid || state.auth?.user?.isAnonymous) return;
+        set({ syncStatus: 'syncing' });
+        try {
+          await pushToFirestore(uid, state);
+          set({ syncStatus: 'synced' });
+        } catch {
+          set({ syncStatus: 'offline' });
+        }
+      },
+
+      mergeFromCloud: async () => {
+        const state = get();
+        const uid   = state.auth?.user?.uid;
+        if (!uid || state.auth?.user?.isAnonymous) return;
+        set({ syncStatus: 'syncing' });
+        try {
+          const remote = await pullFromFirestore(uid);
+          if (!remote) { set({ syncStatus: 'synced' }); return; }
+          const localTs  = state.meta?.lastUpdated  ?? 0;
+          const remoteTs = remote.lastUpdated        ?? 0;
+          if (remoteTs > localTs) {
+            set({
+              characters:          remote.characters          ?? state.characters,
+              usedAuraNumbers:     remote.usedAuraNumbers     ?? state.usedAuraNumbers,
+              usedAbilityCombos:   remote.usedAbilityCombos   ?? state.usedAbilityCombos,
+              completedAuraRanges: remote.completedAuraRanges ?? state.completedAuraRanges,
+              lereles:             remote.lereles             ?? state.lereles,
+              auraFragments:       remote.auraFragments       ?? state.auraFragments,
+              extraEcoSlots:       remote.extraEcoSlots       ?? state.extraEcoSlots,
+              meta:                remote.meta                ?? state.meta,
+            });
+          }
+          set({ syncStatus: 'synced' });
+        } catch {
+          set({ syncStatus: 'offline' });
+        }
+      },
+
+      // ── UI ────────────────────────────────────────────────────────────────
+      screen: 'home',
+
       setScreen: (screen) => set({ screen }),
 
-      // ID del set que se está editando actualmente (no persiste entre sesiones)
-      currentEditSetId: null,
-      setCurrentEditSetId: (id) => set({ currentEditSetId: id }),
+      creatorPreselect: null,
 
-      // Toast de logro
+      setCreatorPreselect: (n) => set({ creatorPreselect: n }),
+
       achievementToast: null,
+
       showAchievementToast: (achievementId) => {
         set({ achievementToast: achievementId });
         setTimeout(() => set({ achievementToast: null }), 3500);
       },
     }),
     {
-      name: 'aura-save-v1',
-      version: 1,
-      migrate: (persisted, fromVersion) => {
-        if (fromVersion < 1) {
-          const col = persisted.collection;
-          if (col) {
-            const rmSets  = ['set-one-piece', 'set-dragon-ball'];
-            const rmChars = ['char-luffy','char-zoro','char-nami','char-robin','char-chopper','char-usopp',
-                             'char-goku','char-vegeta','char-piccolo','char-gohan','char-bulma','char-yamcha'];
-            const rmPlaces = ['place-1', 'place-2'];
-            const sets       = { ...col.sets };
-            const characters = { ...col.characters };
-            const places     = { ...col.places };
-            rmSets.forEach(id   => delete sets[id]);
-            rmChars.forEach(id  => delete characters[id]);
-            rmPlaces.forEach(id => delete places[id]);
-            persisted.collection = { ...col, sets, characters, places };
-          }
-        }
-        return persisted;
+      name:    'aura-v2',
+      version: 5,
+      migrate: (persistedState, version) => {
+        let s = persistedState;
+        if (version < 2) s = migrateToV2(s);
+        if (version < 3) s = migrateToV3(s);
+        if (version < 4) s = migrateToV4(s);
+        if (version < 5) s = migrateToV5(s);
+        return s;
       },
       partialize: (state) => ({
-        combat:     state.combat,
-        run:        state.run,
-        meta:       state.meta,
-        collection: state.collection,
-        runConfig:  state.runConfig,
-        auth:       state.auth,
-        // currentEditSetId NO persiste intencionalmente
+        characters:          state.characters,
+        usedAuraNumbers:     state.usedAuraNumbers,
+        usedAbilityCombos:   state.usedAbilityCombos,
+        completedAuraRanges: state.completedAuraRanges,
+        activeRun:           state.activeRun,
+        lereles:             state.lereles,
+        auraFragments:       state.auraFragments,
+        extraEcoSlots:       state.extraEcoSlots,
+        meta:                state.meta,
+        auth:                state.auth,
       }),
     }
   )

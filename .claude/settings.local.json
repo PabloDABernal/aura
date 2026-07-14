@@ -41,7 +41,23 @@
       "Read(//mnt/skills/public/frontend-design/**)",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(git checkout *)",
+      "Bash(dir \"c:\\\\ProyectosIA\\\\Aura\\\\src\\\\store\" /b)",
+      "Bash(cd /mnt/c/ProyectosIA/Aura && npm run build 2>&1 | tail -60)",
+      "Read(//mnt/c/ProyectosIA/**)",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\ProyectosIA\\\\Aura\\\\src\\\\tests\\\\screenshots\")",
+      "Bash(Get-ChildItem -Path \"c:\\\\ProyectosIA\\\\Aura\\\\src\\\\\" -Recurse -File | Select-Object -ExpandProperty FullName | Sort-Object)",
+      "Bash(Find . -type f \\\\\\( -name \"*.js\" -o -name \"*.jsx\" \\\\\\))",
+      "Bash(Sort-Object)",
+      "Bash(node src/__tests__/take_screenshot.mjs)",
+      "Bash(git check-ignore *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git remote *)",
+      "Bash(git commit -q -m ' *)"
+    ],
+    "additionalDirectories": [
+      "c:\\ProyectosIA\\Aura\\src\\components\\probes"
     ]
   }
 }
